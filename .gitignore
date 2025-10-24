@@ -7,6 +7,13 @@ data_local
 .vscode
 _wandb
 
+# UV Python package manager
+.venv/
+.python-version
+uv.lock
+ckpt_dir
+dataset_dir
+
 **/.DS_Store
 
 fuse.cfg

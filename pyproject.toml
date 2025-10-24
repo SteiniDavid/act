@@ -1,0 +1,80 @@
+[project]
+name = "act"
+version = "0.1.0"
+description = "ACT: Action Chunking with Transformers"
+readme = "README.md"
+requires-python = ">=3.9,<3.13"
+license = "MIT"
+
+dependencies = [
+    # PyTorch with CUDA support - using PyTorch's index
+    "torch==2.0.0",
+    "torchvision==0.15.0",
+
+    # NumPy must be <2.0 for compatibility with opencv-python and dm-control
+    "numpy<2.0",
+
+    # Core dependencies
+    "pyquaternion==0.9.9",
+    "pyyaml==6.0",
+    "rospkg==1.5.0",
+    "pexpect==4.8.0",
+    "mujoco==2.3.7",
+    "dm-control==1.0.14",
+    "opencv-python==4.7.0.72",
+    "matplotlib==3.7.1",
+    "einops==0.6.0",
+    "packaging==23.0",
+    "h5py==3.8.0",
+    "ipython==8.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Only include Python modules from the root directory, not subdirectories
+py-modules = [
+    "constants",
+    "ee_sim_env",
+    "imitate_episodes",
+    "policy",
+    "record_sim_episodes",
+    "scripted_policy",
+    "sim_env",
+    "utils",
+    "visualize_episodes",
+]
+
+[tool.uv]
+# Use PyTorch's package index for CUDA-enabled builds
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+
+# Configure the detr subpackage as an editable dependency
+detr = { path = "detr", editable = true }
+
+[tool.uv.workspace]
+members = ["detr"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
