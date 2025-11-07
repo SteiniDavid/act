@@ -72,6 +72,20 @@ def main(args):
     else:
         raise NotImplementedError
 
+    # Phase conditioning parameters
+    use_canonical = args.get('use_canonical', False)
+    num_phases = args.get('num_phases', None)
+    phase_embed_dim = args.get('phase_embed_dim', 64)
+    phase_result_path = args.get('phase_result_path', None)
+
+    # Add phase conditioning to policy config if enabled
+    if use_canonical and policy_class == 'ACT':
+        if num_phases is None:
+            raise ValueError("--num_phases must be specified when using --use_canonical")
+        policy_config['num_phases'] = num_phases
+        policy_config['phase_embed_dim'] = phase_embed_dim
+        print(f"Phase conditioning enabled: num_phases={num_phases}, phase_embed_dim={phase_embed_dim}")
+
     config = {
         'num_epochs': num_epochs,
         'ckpt_dir': ckpt_dir,
@@ -85,7 +99,10 @@ def main(args):
         'seed': args['seed'],
         'temporal_agg': args['temporal_agg'],
         'camera_names': camera_names,
-        'real_robot': not is_sim
+        'real_robot': not is_sim,
+        'use_canonical': use_canonical,
+        'phase_result_path': phase_result_path,
+        'wrap_with_phase': args.get('wrap_with_phase', False),
     }
 
     if is_eval:
@@ -100,7 +117,7 @@ def main(args):
         print()
         exit()
 
-    train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val)
+    train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, use_canonical)
 
     # save dataset stats
     if not os.path.isdir(ckpt_dir):
@@ -167,12 +184,29 @@ def eval_bc(config, ckpt_name, save_episode=True):
     policy = make_policy(policy_class, policy_config)
     loading_status = policy.load_state_dict(torch.load(ckpt_path))
     print(loading_status)
-    policy.cuda()
-    policy.eval()
-    print(f'Loaded: {ckpt_path}')
+
     stats_path = os.path.join(ckpt_dir, f'dataset_stats.pkl')
     with open(stats_path, 'rb') as f:
         stats = pickle.load(f)
+
+    # Wrap policy with phase reconstruction if requested
+    wrap_with_phase = config.get('wrap_with_phase', False)
+    if wrap_with_phase:
+        phase_result_path = config.get('phase_result_path')
+        if phase_result_path is None:
+            raise ValueError("--phase_result_path must be specified when using --wrap_with_phase")
+
+        from phase_wrapped_policy import create_phase_wrapped_act
+        print(f"Wrapping policy with phase reconstruction from: {phase_result_path}")
+        policy = create_phase_wrapped_act(
+            base_policy=policy,
+            phase_result_path=phase_result_path,
+            stats=stats,
+        )
+
+    policy.cuda()
+    policy.eval()
+    print(f'Loaded: {ckpt_path}')
 
     pre_process = lambda s_qpos: (s_qpos - stats['qpos_mean']) / stats['qpos_std']
     post_process = lambda a: a * stats['action_std'] + stats['action_mean']
@@ -207,6 +241,10 @@ def eval_bc(config, ckpt_name, save_episode=True):
             BOX_POSE[0] = np.concatenate(sample_insertion_pose()) # used in sim reset
 
         ts = env.reset()
+
+        # Reset phase decoder if using phase-wrapped policy
+        if wrap_with_phase and hasattr(policy, 'reset'):
+            policy.reset()
 
         ### onscreen render
         if onscreen_render:
@@ -314,9 +352,23 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
 
 def forward_pass(data, policy):
-    image_data, qpos_data, action_data, is_pad = data
-    image_data, qpos_data, action_data, is_pad = image_data.cuda(), qpos_data.cuda(), action_data.cuda(), is_pad.cuda()
-    return policy(qpos_data, image_data, action_data, is_pad) # TODO remove None
+    # Handle both canonical and non-canonical data formats
+    if len(data) == 6:
+        # Phase-conditioned: (image, qpos, action, is_pad, canonical_action, phase_id)
+        image_data, qpos_data, action_data, is_pad, canonical_action_data, phase_id = data
+        image_data = image_data.cuda()
+        qpos_data = qpos_data.cuda()
+        action_data = action_data.cuda()
+        is_pad = is_pad.cuda()
+        canonical_action_data = canonical_action_data.cuda()
+        phase_id = phase_id.cuda()
+        # Train on canonical actions
+        return policy(qpos_data, image_data, canonical_action_data, is_pad, phase_id)
+    else:
+        # Standard: (image, qpos, action, is_pad)
+        image_data, qpos_data, action_data, is_pad = data
+        image_data, qpos_data, action_data, is_pad = image_data.cuda(), qpos_data.cuda(), action_data.cuda(), is_pad.cuda()
+        return policy(qpos_data, image_data, action_data, is_pad)
 
 
 def train_bc(train_dataloader, val_dataloader, config):
@@ -431,5 +483,12 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_dim', action='store', type=int, help='hidden_dim', required=False)
     parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
-    
+
+    # for phase conditioning
+    parser.add_argument('--use_canonical', action='store_true', help='Use phase-conditioned canonical actions')
+    parser.add_argument('--num_phases', action='store', type=int, help='Number of behavioral phases', required=False, default=None)
+    parser.add_argument('--phase_embed_dim', action='store', type=int, help='Phase embedding dimension', required=False, default=64)
+    parser.add_argument('--phase_result_path', action='store', type=str, help='Path to phase detection results (.npz)', required=False, default=None)
+    parser.add_argument('--wrap_with_phase', action='store_true', help='Wrap policy with phase reconstruction for evaluation')
+
     main(vars(parser.parse_args()))

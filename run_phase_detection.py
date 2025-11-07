@@ -11,7 +11,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from ai_syringe_injection.baselines.act_phase.phasetoolkit import (
+from phasetoolkit import (
     detect_phases,
     PhaseDetectionConfig,
 )
@@ -20,10 +20,10 @@ from ai_syringe_injection.baselines.act_phase.phasetoolkit import (
 def main():
     parser = argparse.ArgumentParser(description="Run phase detection on demonstration trajectories")
     parser.add_argument(
-        "--demo-path",
+        "--dataset-dir",
         type=str,
         required=True,
-        help="Path to H5 demonstration file",
+        help="Directory containing episode HDF5 files (episode_0.hdf5, episode_1.hdf5, ...)",
     )
     parser.add_argument(
         "--output-path",
@@ -76,9 +76,9 @@ def main():
     args = parser.parse_args()
 
     # Validate paths
-    demo_path = Path(args.demo_path).expanduser()
-    if not demo_path.exists():
-        raise FileNotFoundError(f"Demo file not found: {demo_path}")
+    dataset_dir = Path(args.dataset_dir).expanduser()
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
 
     output_path = Path(args.output_path).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +87,7 @@ def main():
     if output_path.suffix == '.pkl':
         output_path = output_path.with_suffix('.npz')
 
-    print(f"Loading demonstrations from: {demo_path}")
+    print(f"Loading demonstrations from: {dataset_dir}")
     print(f"Output will be saved to: {output_path}")
     print(f"Configuration:")
     print(f"  - Number of phases (K): {args.num_phases}")
@@ -97,35 +97,40 @@ def main():
     print(f"  - Use actions for clustering: {args.use_actions}")
     print(f"  - Random state: {args.random_state}")
 
-    # Load action sequences from H5 file
-    print("\nExtracting action sequences from trajectories...")
+    # Load action sequences from individual episode HDF5 files
+    print("\nExtracting action sequences from episode files...")
     actions_list = []
 
-    with h5py.File(demo_path, "r") as f:
-        # Sort trajectory keys by numeric suffix (e.g., traj_0, traj_1, ...)
-        traj_keys = sorted(f.keys(), key=lambda s: int(s.split("_")[-1]))
+    # Find all episode files
+    episode_files = sorted(dataset_dir.glob("episode_*.hdf5"),
+                          key=lambda p: int(p.stem.split("_")[1]))
 
-        # Limit number of trajectories if specified
-        if args.num_demos is not None:
-            traj_keys = traj_keys[:args.num_demos]
+    # Limit number of episodes if specified
+    if args.num_demos is not None:
+        episode_files = episode_files[:args.num_demos]
 
-        print(f"Found {len(traj_keys)} trajectories to process")
+    if not episode_files:
+        raise ValueError(f"No episode_*.hdf5 files found in {dataset_dir}")
 
-        for i, traj_key in enumerate(traj_keys):
-            actions = f[traj_key]["actions"][:]
+    print(f"Found {len(episode_files)} episode files to process")
+
+    for i, episode_file in enumerate(episode_files):
+        with h5py.File(episode_file, "r") as f:
+            actions = f["/action"][:]
             actions_list.append(actions)
-            if (i + 1) % 10 == 0 or (i + 1) == len(traj_keys):
-                print(f"  Loaded {i + 1}/{len(traj_keys)} trajectories", end="\r")
 
-        print()  # New line after progress
+        if (i + 1) % 10 == 0 or (i + 1) == len(episode_files):
+            print(f"  Loaded {i + 1}/{len(episode_files)} episodes", end="\r")
 
-        # Print statistics
-        action_dim = actions_list[0].shape[1]
-        traj_lengths = [act.shape[0] for act in actions_list]
-        print(f"\nDataset statistics:")
-        print(f"  - Number of trajectories: {len(actions_list)}")
-        print(f"  - Action dimension: {action_dim}")
-        print(f"  - Trajectory lengths: min={min(traj_lengths)}, max={max(traj_lengths)}, mean={np.mean(traj_lengths):.1f}")
+    print()  # New line after progress
+
+    # Print statistics
+    action_dim = actions_list[0].shape[1]
+    traj_lengths = [act.shape[0] for act in actions_list]
+    print(f"\nDataset statistics:")
+    print(f"  - Number of trajectories: {len(actions_list)}")
+    print(f"  - Action dimension: {action_dim}")
+    print(f"  - Trajectory lengths: min={min(traj_lengths)}, max={max(traj_lengths)}, mean={np.mean(traj_lengths):.1f}")
 
     # Configure phase detection
     config = PhaseDetectionConfig(
@@ -171,10 +176,17 @@ def main():
     phase_result.save(str(output_path))
 
     print("\nPhase detection complete! Results saved successfully.")
-    print(f"\nYou can now run training with:")
-    print(f"  --use-canonical")
-    print(f"  --num-phases {args.num_phases}")
-    print(f"  --phase-result-path {output_path}")
+    print(f"\nNext steps:")
+    print(f"\n1. Preprocess canonical actions:")
+    print(f"   python preprocess_canonical_actions.py \\")
+    print(f"     --dataset_dir {dataset_dir} \\")
+    print(f"     --phase_result_path {output_path} \\")
+    print(f"     --num_episodes {len(actions_list)}")
+    print(f"\n2. Train with phase conditioning:")
+    print(f"   python imitate_episodes.py ... \\")
+    print(f"     --use_canonical \\")
+    print(f"     --num_phases {args.num_phases} \\")
+    print(f"     --phase_result_path {output_path}")
 
 
 if __name__ == "__main__":

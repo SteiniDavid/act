@@ -33,14 +33,8 @@ except (NameError, ImportError):
     # Not in IPython/Jupyter, use default backend
     pass
 
-# Add parent directory to path for imports to work when running as script
-script_dir = Path(__file__).parent if '__file__' in globals() else Path.cwd()
-project_root_for_import = script_dir.parent.parent.parent
-if str(project_root_for_import) not in sys.path:
-    sys.path.insert(0, str(project_root_for_import))
-
 # Import PhaseDetectionResult for proper data loading
-from ai_syringe_injection.baselines.act_phase.phasetoolkit import PhaseDetectionResult
+from phasetoolkit import PhaseDetectionResult
 
 # %% [markdown]
 """

@@ -64,6 +64,13 @@ def get_args_parser():
     parser.add_argument('--chunk_size', action='store', type=int, help='chunk_size', required=False)
     parser.add_argument('--temporal_agg', action='store_true')
 
+    # Phase conditioning arguments
+    parser.add_argument('--use_canonical', action='store_true', help='Use phase-conditioned canonical actions')
+    parser.add_argument('--num_phases', action='store', type=int, help='Number of behavioral phases', required=False, default=None)
+    parser.add_argument('--phase_embed_dim', action='store', type=int, help='Phase embedding dimension', required=False, default=64)
+    parser.add_argument('--phase_result_path', action='store', type=str, help='Path to phase detection results (.npz)', required=False, default=None)
+    parser.add_argument('--wrap_with_phase', action='store_true', help='Wrap policy with phase reconstruction for evaluation')
+
     return parser
 
 

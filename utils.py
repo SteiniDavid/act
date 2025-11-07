@@ -8,12 +8,13 @@ import IPython
 e = IPython.embed
 
 class EpisodicDataset(torch.utils.data.Dataset):
-    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats):
+    def __init__(self, episode_ids, dataset_dir, camera_names, norm_stats, use_canonical=False):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
         self.dataset_dir = dataset_dir
         self.camera_names = camera_names
         self.norm_stats = norm_stats
+        self.use_canonical = use_canonical
         self.is_sim = None
         self.__getitem__(0) # initialize self.is_sim
 
@@ -47,11 +48,35 @@ class EpisodicDataset(torch.utils.data.Dataset):
                 action = root['/action'][max(0, start_ts - 1):] # hack, to make timesteps more aligned
                 action_len = episode_len - max(0, start_ts - 1) # hack, to make timesteps more aligned
 
+            # Load canonical actions and phase labels if using phase conditioning
+            if self.use_canonical:
+                if '/canonical_actions' in root and '/phase_labels' in root:
+                    if is_sim:
+                        canonical_action = root['/canonical_actions'][start_ts:]
+                    else:
+                        canonical_action = root['/canonical_actions'][max(0, start_ts - 1):]
+                    phase_label = root['/phase_labels'][start_ts]  # Phase at current timestep
+                else:
+                    raise ValueError(
+                        f"use_canonical=True but episode {episode_id} does not have canonical_actions or phase_labels. "
+                        f"Please run preprocess_canonical_actions.py first."
+                    )
+            else:
+                canonical_action = None
+                phase_label = None
+
         self.is_sim = is_sim
         padded_action = np.zeros(original_action_shape, dtype=np.float32)
         padded_action[:action_len] = action
         is_pad = np.zeros(episode_len)
         is_pad[action_len:] = 1
+
+        # Pad canonical actions if using them
+        if self.use_canonical:
+            padded_canonical_action = np.zeros(original_action_shape, dtype=np.float32)
+            padded_canonical_action[:action_len] = canonical_action
+        else:
+            padded_canonical_action = None
 
         # new axis for different cameras
         all_cam_images = []
@@ -73,7 +98,15 @@ class EpisodicDataset(torch.utils.data.Dataset):
         action_data = (action_data - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
         qpos_data = (qpos_data - self.norm_stats["qpos_mean"]) / self.norm_stats["qpos_std"]
 
-        return image_data, qpos_data, action_data, is_pad
+        # Process canonical actions and phase labels
+        if self.use_canonical:
+            canonical_action_data = torch.from_numpy(padded_canonical_action).float()
+            # Normalize canonical actions with same stats as regular actions
+            canonical_action_data = (canonical_action_data - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
+            phase_id = torch.tensor(phase_label, dtype=torch.long)
+            return image_data, qpos_data, action_data, is_pad, canonical_action_data, phase_id
+        else:
+            return image_data, qpos_data, action_data, is_pad
 
 
 def get_norm_stats(dataset_dir, num_episodes):
@@ -108,7 +141,7 @@ def get_norm_stats(dataset_dir, num_episodes):
     return stats
 
 
-def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val):
+def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, use_canonical=False):
     print(f'\nData from: {dataset_dir}\n')
     # obtain train test split
     train_ratio = 0.8
@@ -120,8 +153,8 @@ def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_s
     norm_stats = get_norm_stats(dataset_dir, num_episodes)
 
     # construct dataset and dataloader
-    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats)
-    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
+    train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats, use_canonical)
+    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats, use_canonical)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
 

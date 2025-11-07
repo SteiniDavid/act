@@ -10,10 +10,8 @@ dependencies = [
     # PyTorch with CUDA support - using PyTorch's index
     "torch==2.0.0",
     "torchvision==0.15.0",
-
     # NumPy must be <2.0 for compatibility with opencv-python and dm-control
     "numpy<2.0",
-
     # Core dependencies
     "pyquaternion==0.9.9",
     "pyyaml==6.0",
@@ -27,6 +25,7 @@ dependencies = [
     "packaging==23.0",
     "h5py==3.8.0",
     "ipython==8.12.0",
+    "hmmlearn>=0.3.3",
 ]
 
 [project.optional-dependencies]

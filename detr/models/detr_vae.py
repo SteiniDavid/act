@@ -33,7 +33,7 @@ def get_sinusoid_encoding_table(n_position, d_hid):
 
 class DETRVAE(nn.Module):
     """ This is the DETR module that performs object detection """
-    def __init__(self, backbones, transformer, encoder, state_dim, num_queries, camera_names):
+    def __init__(self, backbones, transformer, encoder, state_dim, num_queries, camera_names, num_phases=None, phase_embed_dim=64):
         """ Initializes the model.
         Parameters:
             backbones: torch module of the backbone to be used. See backbone.py
@@ -42,16 +42,27 @@ class DETRVAE(nn.Module):
             num_queries: number of object queries, ie detection slot. This is the maximal number of objects
                          DETR can detect in a single image. For COCO, we recommend 100 queries.
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
+            num_phases: Optional number of behavioral phases for phase conditioning. If None, phase conditioning is disabled.
+            phase_embed_dim: Dimension of phase embeddings before projection to hidden_dim
         """
         super().__init__()
         self.num_queries = num_queries
         self.camera_names = camera_names
         self.transformer = transformer
         self.encoder = encoder
+        self.num_phases = num_phases
         hidden_dim = transformer.d_model
         self.action_head = nn.Linear(hidden_dim, state_dim)
         self.is_pad_head = nn.Linear(hidden_dim, 1)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
+
+        # Phase conditioning modules (optional)
+        if num_phases is not None:
+            self.phase_emb = nn.Embedding(num_phases, phase_embed_dim)
+            self.phase_proj = nn.Linear(phase_embed_dim, hidden_dim)
+        else:
+            self.phase_emb = None
+            self.phase_proj = None
         if backbones is not None:
             self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
             self.backbones = nn.ModuleList(backbones)
@@ -73,14 +84,17 @@ class DETRVAE(nn.Module):
 
         # decoder extra parameters
         self.latent_out_proj = nn.Linear(self.latent_dim, hidden_dim) # project latent sample to embedding
-        self.additional_pos_embed = nn.Embedding(2, hidden_dim) # learned position embedding for proprio and latent
+        # learned position embedding for additional tokens (latent, proprio, optionally phase)
+        num_additional_tokens = 3 if num_phases is not None else 2
+        self.additional_pos_embed = nn.Embedding(num_additional_tokens, hidden_dim)
 
-    def forward(self, qpos, image, env_state, actions=None, is_pad=None):
+    def forward(self, qpos, image, env_state, actions=None, is_pad=None, phase_ids=None):
         """
         qpos: batch, qpos_dim
         image: batch, num_cam, channel, height, width
         env_state: None
         actions: batch, seq, action_dim
+        phase_ids: batch (optional) - phase label for current timestep
         """
         is_training = actions is not None # train or val
         bs, _ = qpos.shape
@@ -88,12 +102,20 @@ class DETRVAE(nn.Module):
         if is_training:
             # project action sequence to embedding dim, and concat with a CLS token
             action_embed = self.encoder_action_proj(actions) # (bs, seq, hidden_dim)
+
+            # Add phase conditioning to encoder if available
+            if self.num_phases is not None and phase_ids is not None:
+                phase_embed = self.phase_proj(self.phase_emb(phase_ids))  # (bs, hidden_dim)
+                phase_embed = phase_embed.unsqueeze(1)  # (bs, 1, hidden_dim)
+                # Broadcast phase embedding to all action timesteps
+                action_embed = action_embed + phase_embed
+
             qpos_embed = self.encoder_joint_proj(qpos)  # (bs, hidden_dim)
             qpos_embed = torch.unsqueeze(qpos_embed, axis=1)  # (bs, 1, hidden_dim)
             cls_embed = self.cls_embed.weight # (1, hidden_dim)
             cls_embed = torch.unsqueeze(cls_embed, axis=0).repeat(bs, 1, 1) # (bs, 1, hidden_dim)
-            encoder_input = torch.cat([cls_embed, qpos_embed, action_embed], axis=1) # (bs, seq+1, hidden_dim)
-            encoder_input = encoder_input.permute(1, 0, 2) # (seq+1, bs, hidden_dim)
+            encoder_input = torch.cat([cls_embed, qpos_embed, action_embed], axis=1) # (bs, seq+2, hidden_dim)
+            encoder_input = encoder_input.permute(1, 0, 2) # (seq+2, bs, hidden_dim)
             # do not mask cls token
             cls_joint_is_pad = torch.full((bs, 2), False).to(qpos.device) # False: not a padding
             is_pad = torch.cat([cls_joint_is_pad, is_pad], axis=1)  # (bs, seq+1)
@@ -125,10 +147,17 @@ class DETRVAE(nn.Module):
                 all_cam_pos.append(pos)
             # proprioception features
             proprio_input = self.input_proj_robot_state(qpos)
+
+            # Add phase conditioning to decoder if available
+            if self.num_phases is not None and phase_ids is not None:
+                phase_input = self.phase_proj(self.phase_emb(phase_ids))  # (bs, hidden_dim)
+            else:
+                phase_input = None
+
             # fold camera dimension into width dimension
             src = torch.cat(all_cam_features, axis=3)
             pos = torch.cat(all_cam_pos, axis=3)
-            hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight)[0]
+            hs = self.transformer(src, None, self.query_embed.weight, pos, latent_input, proprio_input, self.additional_pos_embed.weight, phase_input)[0]
         else:
             qpos = self.input_proj_robot_state(qpos)
             env_state = self.input_proj_env_state(env_state)
@@ -247,6 +276,8 @@ def build(args):
         state_dim=state_dim,
         num_queries=args.num_queries,
         camera_names=args.camera_names,
+        num_phases=getattr(args, 'num_phases', None),
+        phase_embed_dim=getattr(args, 'phase_embed_dim', 64),
     )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)

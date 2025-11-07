@@ -145,3 +145,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+
+ckpt_phase/
+ckpt_baseline/
+phase_results/
