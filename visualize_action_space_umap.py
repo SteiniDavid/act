@@ -386,6 +386,131 @@ fig_3d_temporal.show()
 print("3D visualizations created!")
 
 # %% [markdown]
+## Per-Phase UMAP Analysis (2D with Temporal Coloring)
+
+# %%
+print("Computing per-phase UMAP embeddings...")
+
+# Get unique phases
+unique_phases = np.unique(phase_labels)
+num_phases = len(unique_phases)
+
+print(f"  Found {num_phases} unique phases: {unique_phases}")
+
+# Create per-phase embeddings
+phase_embeddings = {}
+phase_temporal_bins = {}
+phase_episode_ids = {}
+phase_timestep_ids = {}
+
+for phase in unique_phases:
+    phase_int = int(phase)
+    print(f"\n  Processing Phase {phase_int}...")
+
+    # Filter data for this phase
+    phase_mask = phase_labels == phase
+    phase_actions = actions[phase_mask]
+    phase_temporal = temporal_bins[phase_mask]
+    phase_episodes = episode_ids[phase_mask]
+    phase_timesteps = timestep_ids[phase_mask]
+
+    print(f"    Samples in phase: {len(phase_actions)}")
+
+    # Compute 2D UMAP for this phase
+    umap_phase = umap.UMAP(
+        n_neighbors=min(UMAP_N_NEIGHBORS, len(phase_actions) - 1),  # Adjust if too few samples
+        min_dist=UMAP_MIN_DIST,
+        n_components=2,
+        metric=UMAP_METRIC,
+        random_state=RANDOM_STATE,
+        verbose=False
+    )
+    embedding_phase = umap_phase.fit_transform(phase_actions)
+
+    # Store results
+    phase_embeddings[phase_int] = embedding_phase
+    phase_temporal_bins[phase_int] = phase_temporal
+    phase_episode_ids[phase_int] = phase_episodes
+    phase_timestep_ids[phase_int] = phase_timesteps
+
+    print(f"    Embedding shape: {embedding_phase.shape}")
+
+print("\nPer-phase UMAP computation complete!")
+
+# %%
+# Create subplot figure with one plot per phase
+from plotly.subplots import make_subplots
+
+fig_per_phase = make_subplots(
+    rows=1, cols=num_phases,
+    subplot_titles=[f"Phase {int(p)}" for p in unique_phases],
+    horizontal_spacing=0.08
+)
+
+# Add trace for each phase
+for idx, phase in enumerate(unique_phases):
+    phase_int = int(phase)
+    embedding = phase_embeddings[phase_int]
+    temporal = phase_temporal_bins[phase_int]
+    episodes = phase_episode_ids[phase_int]
+    timesteps = phase_timestep_ids[phase_int]
+
+    # Create hover text
+    hover_text = []
+    for i in range(len(embedding)):
+        text = f"Episode: {episodes[i]}<br>"
+        text += f"Timestep: {timesteps[i]}<br>"
+        text += f"Temporal Bin: {TEMPORAL_BIN_LABELS[int(temporal[i])]}<br>"
+        text += f"UMAP X: {embedding[i, 0]:.3f}<br>"
+        text += f"UMAP Y: {embedding[i, 1]:.3f}"
+        hover_text.append(text)
+
+    # Add scatter trace
+    fig_per_phase.add_trace(
+        go.Scatter(
+            x=embedding[:, 0],
+            y=embedding[:, 1],
+            mode='markers',
+            marker=dict(
+                size=3,
+                color=temporal,
+                colorscale='Plasma',
+                showscale=(idx == num_phases - 1),  # Only show colorbar on last subplot
+                cmin=0,
+                cmax=NUM_TEMPORAL_BINS - 1,
+                opacity=0.6,
+                colorbar=dict(
+                    title="Episode<br>Progress",
+                    tickvals=list(range(NUM_TEMPORAL_BINS)),
+                    ticktext=TEMPORAL_BIN_LABELS,
+                    x=1.02
+                ) if idx == num_phases - 1 else None
+            ),
+            text=hover_text,
+            hovertemplate='%{text}<extra></extra>',
+            showlegend=False
+        ),
+        row=1, col=idx + 1
+    )
+
+    # Update axes labels
+    fig_per_phase.update_xaxes(title_text="UMAP Dim 1", row=1, col=idx + 1)
+    if idx == 0:
+        fig_per_phase.update_yaxes(title_text="UMAP Dim 2", row=1, col=idx + 1)
+
+# Update overall layout
+fig_per_phase.update_layout(
+    title_text="Per-Phase UMAP: Actions Colored by Episode Progress",
+    width=400 * num_phases,
+    height=500,
+    hovermode='closest'
+)
+
+fig_per_phase.show()
+
+print("Per-phase visualization created!")
+
+# %% [markdown]
 ## Analysis and Interpretation
 
 # %%
