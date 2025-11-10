@@ -101,8 +101,9 @@ class EpisodicDataset(torch.utils.data.Dataset):
         # Process canonical actions and phase labels
         if self.use_canonical:
             canonical_action_data = torch.from_numpy(padded_canonical_action).float()
-            # Normalize canonical actions with same stats as regular actions
-            canonical_action_data = (canonical_action_data - self.norm_stats["action_mean"]) / self.norm_stats["action_std"]
+            # DO NOT normalize canonical actions - they are already standardized (mean≈0, std≈1)
+            # by the phase decomposition: canonical = L_k^{-1} @ (action - μ_k)
+            # Normalizing with environment action stats breaks the reconstruction math
             phase_id = torch.tensor(phase_label, dtype=torch.long)
             return image_data, qpos_data, action_data, is_pad, canonical_action_data, phase_id
         else:

@@ -21,6 +21,48 @@ from sim_env import BOX_POSE
 import IPython
 e = IPython.embed
 
+
+def validate_canonical_actions(dataloader, use_canonical=False):
+    """
+    Validate that canonical actions have the expected statistical properties.
+    Canonical actions should have mean ≈ 0 and std ≈ 1 after phase decomposition.
+    """
+    if not use_canonical:
+        return
+
+    print("\n=== Validating Canonical Action Statistics ===")
+    all_canonical_actions = []
+
+    for batch_idx, data in enumerate(dataloader):
+        if len(data) == 6:  # With canonical actions
+            _, _, _, _, canonical_action_data, _ = data
+            all_canonical_actions.append(canonical_action_data.cpu().numpy())
+        if batch_idx >= 10:  # Sample first 10 batches
+            break
+
+    if all_canonical_actions:
+        all_canonical_actions = np.concatenate(all_canonical_actions, axis=0)
+        # Flatten to (total_samples, action_dim)
+        all_canonical_actions = all_canonical_actions.reshape(-1, all_canonical_actions.shape[-1])
+
+        canonical_mean = all_canonical_actions.mean(axis=0)
+        canonical_std = all_canonical_actions.std(axis=0)
+
+        print(f"Canonical action mean (should be ≈0): {canonical_mean}")
+        print(f"Canonical action std (should be ≈1): {canonical_std}")
+        print(f"Mean of means: {canonical_mean.mean():.6f}")
+        print(f"Mean of stds: {canonical_std.mean():.6f}")
+
+        # Check if statistics are reasonable
+        if abs(canonical_mean.mean()) > 0.5:
+            print("WARNING: Canonical actions have non-zero mean! Phase decomposition may be incorrect.")
+        if abs(canonical_std.mean() - 1.0) > 0.5:
+            print("WARNING: Canonical actions std is far from 1! Phase decomposition may be incorrect.")
+        else:
+            print("✓ Canonical action statistics look good!")
+    print("=" * 50 + "\n")
+
+
 def main(args):
     set_seed(1)
     # command line parameters
@@ -118,6 +160,9 @@ def main(args):
         exit()
 
     train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val, use_canonical)
+
+    # Validate canonical action statistics if using phase conditioning
+    validate_canonical_actions(train_dataloader, use_canonical)
 
     # save dataset stats
     if not os.path.isdir(ckpt_dir):

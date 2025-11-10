@@ -76,45 +76,56 @@ class PhaseWrappedACT(nn.Module):
         # Track current phase prediction
         self.current_phase = 0
 
+        # Observation history for improved phase prediction
+        self.obs_history = []
+        self.max_history_len = 10  # Keep last 10 observations
+
     def reset(self):
         """Reset the phase decoder for a new episode."""
         self.phase_decoder.reset()
         self.current_phase = 0
+        self.obs_history = []  # Clear observation history
 
     def predict_phase(self, qpos: np.ndarray) -> int:
         """
-        Predict the current phase from proprioceptive state.
+        Predict the current phase from proprioceptive state using observation history.
 
         Args:
-            qpos: Proprioceptive state (14,)
+            qpos: Proprioceptive state (obs_dim,)
 
         Returns:
             Predicted phase ID
         """
-        # Use qpos as observation for phase prediction
+        # Add current observation to history
+        self.obs_history.append(qpos)
+
+        # Keep only the most recent observations
+        if len(self.obs_history) > self.max_history_len:
+            self.obs_history = self.obs_history[-self.max_history_len:]
+
+        # Use observation history for phase prediction
         # OnlinePhaseDecoder.predict_phase expects a sequence of shape (seq_len, obs_dim)
-        # For single step prediction, wrap in array
-        obs_seq = qpos.reshape(1, -1)
+        obs_seq = np.array(self.obs_history)  # (history_len, obs_dim)
+
         predicted_phase = self.phase_decoder.predict_phase(obs_seq)
         self.current_phase = predicted_phase
         return predicted_phase
 
     def canonical_to_env_action(self, canonical_action: np.ndarray, phase_id: int) -> np.ndarray:
         """
-        Convert normalized canonical action to environment action.
+        Convert canonical action to environment action.
 
         Args:
-            canonical_action: Normalized canonical action (action_dim,)
+            canonical_action: Canonical action (action_dim,) - already in correct space (mean≈0, std≈1)
             phase_id: Phase identifier
 
         Returns:
             Environment action (action_dim,)
         """
-        # Denormalize canonical action first
-        canonical_action_denorm = canonical_action * self.stats['action_std'] + self.stats['action_mean']
-
-        # Convert to environment action using phase projector
-        env_action = self.phase_projector.to_action(canonical_action_denorm, phase_id)
+        # Canonical actions are NOT normalized with environment stats anymore (fixed in utils.py)
+        # They are already in the correct standardized space from L_k^{-1} @ (action - μ_k)
+        # So we can directly apply the phase transformation: env_action = μ_k + L_k @ canonical
+        env_action = self.phase_projector.to_action(canonical_action, phase_id)
 
         return env_action
 

@@ -60,9 +60,12 @@ class DETRVAE(nn.Module):
         if num_phases is not None:
             self.phase_emb = nn.Embedding(num_phases, phase_embed_dim)
             self.phase_proj = nn.Linear(phase_embed_dim, hidden_dim)
+            # For stronger phase conditioning in encoder: project concatenated [action_embed, phase_embed]
+            self.encoder_phase_action_proj = nn.Linear(hidden_dim * 2, hidden_dim)
         else:
             self.phase_emb = None
             self.phase_proj = None
+            self.encoder_phase_action_proj = None
         if backbones is not None:
             self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
             self.backbones = nn.ModuleList(backbones)
@@ -107,8 +110,11 @@ class DETRVAE(nn.Module):
             if self.num_phases is not None and phase_ids is not None:
                 phase_embed = self.phase_proj(self.phase_emb(phase_ids))  # (bs, hidden_dim)
                 phase_embed = phase_embed.unsqueeze(1)  # (bs, 1, hidden_dim)
-                # Broadcast phase embedding to all action timesteps
-                action_embed = action_embed + phase_embed
+                # Concatenate phase embedding with action embeddings and project back
+                # This forces the model to explicitly use phase information (stronger than addition)
+                phase_embed_broadcast = phase_embed.expand(-1, action_embed.shape[1], -1)  # (bs, seq, hidden_dim)
+                action_phase_concat = torch.cat([action_embed, phase_embed_broadcast], dim=-1)  # (bs, seq, hidden_dim*2)
+                action_embed = self.encoder_phase_action_proj(action_phase_concat)  # (bs, seq, hidden_dim)
 
             qpos_embed = self.encoder_joint_proj(qpos)  # (bs, hidden_dim)
             qpos_embed = torch.unsqueeze(qpos_embed, axis=1)  # (bs, 1, hidden_dim)
