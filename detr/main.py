@@ -69,6 +69,7 @@ def get_args_parser():
     parser.add_argument('--num_phases', action='store', type=int, help='Number of behavioral phases', required=False, default=None)
     parser.add_argument('--phase_embed_dim', action='store', type=int, help='Phase embedding dimension', required=False, default=64)
     parser.add_argument('--phase_result_path', action='store', type=str, help='Path to phase detection results (.npz)', required=False, default=None)
+    parser.add_argument('--gaussianizer_path', action='store', type=str, help='Path to trained gaussianizer (.pkl) for RealNVP flows', required=False, default=None)
     parser.add_argument('--wrap_with_phase', action='store_true', help='Wrap policy with phase reconstruction for evaluation')
 
     return parser
@@ -118,4 +119,3 @@ def build_CNNMLP_model_and_optimizer(args_override):
                                   weight_decay=args.weight_decay)
 
     return model, optimizer
-

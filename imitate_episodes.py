@@ -144,6 +144,7 @@ def main(args):
         'real_robot': not is_sim,
         'use_canonical': use_canonical,
         'phase_result_path': phase_result_path,
+        'gaussianizer_path': args.get('gaussianizer_path', None),
         'wrap_with_phase': args.get('wrap_with_phase', False),
     }
 
@@ -241,11 +242,17 @@ def eval_bc(config, ckpt_name, save_episode=True):
         if phase_result_path is None:
             raise ValueError("--phase_result_path must be specified when using --wrap_with_phase")
 
+        gaussianizer_path = config.get('gaussianizer_path')
+        if gaussianizer_path is None:
+            raise ValueError("--gaussianizer_path must be specified when using --wrap_with_phase")
+
         from phase_wrapped_policy import create_phase_wrapped_act
         print(f"Wrapping policy with phase reconstruction from: {phase_result_path}")
+        print(f"Using RealNVP gaussianizer from: {gaussianizer_path}")
         policy = create_phase_wrapped_act(
             base_policy=policy,
             phase_result_path=phase_result_path,
+            gaussianizer_path=gaussianizer_path,
             stats=stats,
         )
 
@@ -534,6 +541,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_phases', action='store', type=int, help='Number of behavioral phases', required=False, default=None)
     parser.add_argument('--phase_embed_dim', action='store', type=int, help='Phase embedding dimension', required=False, default=64)
     parser.add_argument('--phase_result_path', action='store', type=str, help='Path to phase detection results (.npz)', required=False, default=None)
+    parser.add_argument('--gaussianizer_path', action='store', type=str, help='Path to trained gaussianizer (.pkl) for RealNVP flows', required=False, default=None)
     parser.add_argument('--wrap_with_phase', action='store_true', help='Wrap policy with phase reconstruction for evaluation')
 
     main(vars(parser.parse_args()))

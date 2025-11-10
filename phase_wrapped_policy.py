@@ -3,16 +3,18 @@ Phase-wrapped ACT policy for inference with canonical action reconstruction.
 
 This module provides a wrapper around ACT policies trained on canonical actions,
 enabling real-time phase prediction and canonical-to-environment action conversion
-during policy execution.
+during policy execution using RealNVP normalizing flows.
 """
 
 import torch
 import torch.nn as nn
 import numpy as np
 from typing import Optional
+from pathlib import Path
 
 from phasetoolkit import PhaseDetectionResult
-from phasetoolkit.reconstruction import PhaseProjector, OnlinePhaseDecoder
+from phasetoolkit.reconstruction import OnlinePhaseDecoder
+from phasetoolkit.gaussianization import load_gaussianizer, BasePhaseGaussianizer
 
 
 class PhaseWrappedACT(nn.Module):
@@ -22,7 +24,7 @@ class PhaseWrappedACT(nn.Module):
     This wrapper:
     1. Predicts the current phase from observations using OnlinePhaseDecoder
     2. Calls the base policy with phase conditioning to get canonical actions
-    3. Converts canonical actions back to environment actions using PhaseProjector
+    3. Converts canonical actions back to environment actions using RealNVP inverse transform
 
     The base policy must have been trained with phase conditioning (use_canonical=True).
     """
@@ -31,6 +33,7 @@ class PhaseWrappedACT(nn.Module):
         self,
         base_policy: nn.Module,
         phase_result: PhaseDetectionResult,
+        gaussianizer: BasePhaseGaussianizer,
         stats: dict,
     ):
         """
@@ -39,36 +42,13 @@ class PhaseWrappedACT(nn.Module):
         Args:
             base_policy: ACT policy trained on canonical actions
             phase_result: PhaseDetectionResult containing phase statistics and HMM
+            gaussianizer: Trained RealNVP gaussianizer for inverse transforms
             stats: Dataset statistics dict with action_mean and action_std
         """
         super().__init__()
         self.base_policy = base_policy
         self.stats = stats
-
-        # Create phase projector for canonical -> environment action conversion
-        phase_stats_dict = {}
-        if phase_result.stats is not None:
-            for k in range(phase_result.config.K):
-                # Create reconstruction stats from phase statistics
-                mu_k = phase_result.stats.mu_list[k]
-                Sigma_k = phase_result.stats.Sigma_list[k]
-
-                # Compute Cholesky decomposition with regularization
-                eps = 1e-6
-                Sigma_reg = Sigma_k + eps * np.eye(Sigma_k.shape[0])
-                L_k = np.linalg.cholesky(Sigma_reg)
-                Linv_k = np.linalg.inv(L_k)
-
-                # Store in format expected by PhaseProjector
-                from phasetoolkit.core.reconstruction import PhaseReconstructionStats
-                phase_stats_dict[k] = PhaseReconstructionStats(
-                    mu=mu_k,
-                    Sigma=Sigma_k,
-                    L=L_k,
-                    Linv=Linv_k
-                )
-
-        self.phase_projector = PhaseProjector(phase_stats_dict)
+        self.gaussianizer = gaussianizer
 
         # Create online phase decoder for real-time phase prediction
         self.phase_decoder = OnlinePhaseDecoder(phase_result)
@@ -113,21 +93,21 @@ class PhaseWrappedACT(nn.Module):
 
     def canonical_to_env_action(self, canonical_action: np.ndarray, phase_id: int) -> np.ndarray:
         """
-        Convert canonical action to environment action.
+        Convert canonical action to environment action using RealNVP inverse transform.
 
         Args:
-            canonical_action: Canonical action (action_dim,) - already in correct space (mean≈0, std≈1)
+            canonical_action: Canonical action (action_dim,) - flow-normalized to ~N(0, I)
             phase_id: Phase identifier
 
         Returns:
             Environment action (action_dim,)
         """
-        # Canonical actions are NOT normalized with environment stats anymore (fixed in utils.py)
-        # They are already in the correct standardized space from L_k^{-1} @ (action - μ_k)
-        # So we can directly apply the phase transformation: env_action = μ_k + L_k @ canonical
-        env_action = self.phase_projector.to_action(canonical_action, phase_id)
+        # Use the RealNVP flow's inverse transform to map from canonical space back to environment space
+        # canonical_action is a single action vector, but inverse_transform expects (batch, action_dim)
+        canonical_batch = canonical_action.reshape(1, -1)  # (1, action_dim)
+        env_action = self.gaussianizer.inverse_transform(phase_id, canonical_batch)  # (1, action_dim)
 
-        return env_action
+        return env_action[0]  # Extract single action vector
 
     def __call__(
         self,
@@ -212,14 +192,16 @@ class PhaseWrappedACT(nn.Module):
 def create_phase_wrapped_act(
     base_policy: nn.Module,
     phase_result_path: str,
+    gaussianizer_path: str,
     stats: dict,
 ) -> PhaseWrappedACT:
     """
-    Convenience function to create a phase-wrapped ACT policy.
+    Convenience function to create a phase-wrapped ACT policy with RealNVP flows.
 
     Args:
         base_policy: ACT policy trained on canonical actions
         phase_result_path: Path to phase detection results (.npz file)
+        gaussianizer_path: Path to trained gaussianizer (.pkl file)
         stats: Dataset statistics dict
 
     Returns:
@@ -228,10 +210,15 @@ def create_phase_wrapped_act(
     # Load phase detection results
     phase_result = PhaseDetectionResult.load(phase_result_path)
 
+    # Load trained gaussianizer
+    spec, gaussianizer = load_gaussianizer(gaussianizer_path)
+    print(f"Loaded gaussianizer: {spec.label} ({spec.kind})")
+
     # Create wrapped policy
     wrapped_policy = PhaseWrappedACT(
         base_policy=base_policy,
         phase_result=phase_result,
+        gaussianizer=gaussianizer,
         stats=stats,
     )
 

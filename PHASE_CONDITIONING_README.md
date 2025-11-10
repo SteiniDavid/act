@@ -6,8 +6,8 @@ This document describes the phase conditioning implementation that has been adde
 
 Phase conditioning enhances ACT by:
 1. **Phase-Aware Training**: Conditioning the action encoder/decoder on learned phase embeddings
-2. **Canonical Action Space**: Training on canonical (phase-normalized) actions for narrower distributions
-3. **Online Reconstruction**: Converting canonical predictions back to environment actions during inference
+2. **Canonical Action Space**: Training on canonical (phase-normalized) actions using RealNVP normalizing flows for narrower distributions
+3. **Online Reconstruction**: Converting canonical predictions back to environment actions during inference using trained flow models
 
 ## Key Benefits
 
@@ -118,20 +118,36 @@ This creates:
 - `phase_results/K3_hmm_bundle.pkl` - HMM parameters for online tracking
 - `phase_results/K3_config.json` - Phase detection configuration
 
-### Step 2: Preprocess Demonstrations
+### Step 2: Preprocess Demonstrations with RealNVP Flows
 
-Compute and save canonical actions to HDF5 files:
+Train RealNVP flows and compute canonical actions:
 
 ```bash
 python preprocess_canonical_actions.py \
     --dataset_dir dataset_dir \
     --phase_result_path phase_results/K3.npz \
-    --num_episodes 50
+    --num_episodes 50 \
+    --flow_preset medium \
+    --device cuda
 ```
 
+**What this does:**
+1. Collects all actions grouped by phase across episodes
+2. Trains one RealNVP flow per phase (3 flows for K=3)
+3. Transforms actions to canonical space using trained flows
+4. Saves trained gaussianizer to `phase_results/<task_name>_gaussianizer.pkl`
+
+**Flow Presets:**
+- `light`: 4 coupling layers, 64 hidden dim, 150 epochs (fast, less expressive)
+- `medium`: 8 coupling layers, 128 hidden dim, 250 epochs (balanced - default)
+- `heavy`: 12 coupling layers, 256 hidden dim, 400 epochs (slow, most expressive)
+
 This adds to each `episode_N.hdf5`:
-- `/canonical_actions` - Phase-normalized actions (T, 14)
+- `/canonical_actions` - RealNVP flow-normalized actions (T, 14)
 - `/phase_labels` - Phase IDs for each timestep (T,)
+
+And creates:
+- `phase_results/<task_name>_gaussianizer.pkl` - Trained RealNVP flows for all phases
 
 ### Step 3: Train with Phase Conditioning
 
@@ -155,9 +171,9 @@ python imitate_episodes.py \
     --phase_result_path phase_results/K3.npz
 ```
 
-### Step 4: Evaluate with Phase Wrapping
+### Step 4: Evaluate with Phase Wrapping and RealNVP Inverse Transforms
 
-Evaluate with canonical action reconstruction:
+Evaluate with canonical action reconstruction using trained flows:
 
 **IMPORTANT**: You must include the same `--use_canonical` and `--num_phases` arguments used during training to properly load the checkpoint!
 
@@ -178,8 +194,15 @@ python imitate_episodes.py \
     --num_phases 3 \
     --eval \
     --wrap_with_phase \
-    --phase_result_path phase_results/K3.npz
+    --phase_result_path phase_results/K3.npz \
+    --gaussianizer_path phase_results/dataset_dir_gaussianizer.pkl
 ```
+
+**What happens during evaluation:**
+1. Policy predicts current phase from observations
+2. Policy outputs canonical actions (in flow-normalized space)
+3. RealNVP flow's inverse transform converts canonical → environment actions
+4. Environment executes the reconstructed actions
 
 ### Baseline ACT (No Phase Conditioning)
 
@@ -220,22 +243,31 @@ python imitate_episodes.py \
 
 ## Implementation Details
 
-### Canonical Action Transformation
+### Canonical Action Transformation with RealNVP Flows
+
+This implementation uses **RealNVP (Real-valued Non-Volume Preserving) normalizing flows** for per-phase action normalization. Each phase k has its own trained flow model.
 
 **Forward** (Training): Environment → Canonical
 ```python
-canonical = L_k^{-1} @ (action - μ_k)
+canonical = flow_k.forward(action)  # Maps to z ~ N(0, I)
 ```
 
 **Inverse** (Inference): Canonical → Environment
 ```python
-action = μ_k + L_k @ canonical
+action = flow_k.inverse(canonical)  # Maps back to environment space
 ```
 
-Where:
-- `μ_k`: Mean action for phase k
-- `L_k`: Cholesky factor of covariance Σ_k
-- Ensures stable, invertible transformations
+**Why RealNVP over Linear Methods?**
+- **Non-linear transformations**: Handles complex, multi-modal action distributions within each phase
+- **Invertible by design**: Coupling layers ensure exact inverse transforms
+- **Expressive**: Can model intricate dependencies between action dimensions
+- **Per-phase specialization**: Each phase gets its own flow trained on phase-specific data
+
+**RealNVP Architecture:**
+- Coupling layers with alternating masks
+- MLP scale and translation networks
+- Trained to maximize likelihood under Gaussian prior
+- Three presets available: light (4 layers), medium (8 layers), heavy (12 layers)
 
 ### Phase Prediction During Inference
 
@@ -348,12 +380,47 @@ python imitate_episodes.py ... --use_canonical --num_phases 3
 python imitate_episodes.py ... --eval --wrap_with_phase --phase_result_path phase_results/xxx.npz
 ```
 
+### Error: "--gaussianizer_path must be specified when using --wrap_with_phase"
+
+**Solution**: Provide path to trained gaussianizer during evaluation:
+```bash
+python imitate_episodes.py ... --eval --wrap_with_phase \
+    --phase_result_path phase_results/K3.npz \
+    --gaussianizer_path phase_results/task_name_gaussianizer.pkl
+```
+
+The gaussianizer file is created during preprocessing (Step 2) and contains the trained RealNVP flows.
+
 ### Warning: Phase mismatch during inference
 
 Check that:
 1. Phase detection was run on the same task
 2. Number of phases matches training (`--num_phases`)
 3. Phase result file path is correct
+
+## RealNVP Flow Benefits
+
+Using RealNVP normalizing flows provides several advantages over linear methods:
+
+1. **Handling Complex Distributions**:
+   - Multi-modal action distributions within phases (e.g., different grasping strategies)
+   - Non-linear dependencies between action dimensions
+   - Captures intricate correlations that linear methods miss
+
+2. **Better Gaussian Approximation**:
+   - Flows explicitly optimize to transform data into Gaussian
+   - More effective at producing z ~ N(0, I) canonical actions
+   - Easier for policy to learn and generalize
+
+3. **Exact Invertibility**:
+   - Coupling layers guarantee exact inverse transforms
+   - No approximation errors during canonical → environment conversion
+   - Preserves action precision during inference
+
+4. **Per-Phase Specialization**:
+   - Each phase gets its own flow trained on phase-specific data
+   - Captures unique characteristics of different task stages
+   - No interference between phase distributions
 
 ## Future Enhancements
 
@@ -364,22 +431,33 @@ Potential improvements to explore:
    - FiLM-style modulation of transformer layers
    - Phase-specific action heads
 
-2. **Dynamic Phase Models**:
-   - Online phase model adaptation
-   - Hierarchical phase structures
-   - Continuous phase representations
+2. **Flow Architecture Variants**:
+   - Masked Autoregressive Flows (MAF) for better expressiveness
+   - Continuous Normalizing Flows (CNF) for continuous-time dynamics
+   - Spline-based flows for better gradient properties
 
-3. **Multi-Task Phases**:
-   - Shared phase models across tasks
-   - Transfer learning via phase embeddings
+3. **Dynamic Phase Models**:
+   - Online flow adaptation during deployment
+   - Hierarchical phase structures with nested flows
+   - Continuous phase representations with flow interpolation
 
-4. **Phase Dropout** (Classifier-Free Guidance):
+4. **Multi-Task Phases**:
+   - Shared flow models across related tasks
+   - Transfer learning via pre-trained flows
+   - Meta-learning for flow initialization
+
+5. **Phase Dropout** (Classifier-Free Guidance):
    - Randomly drop phase conditioning during training
    - Improves robustness to phase prediction errors
 
 ## References
 
-This implementation is based on the phase conditioning approach described in your documentation, adapted for the ACT architecture.
+This implementation combines:
+- **Phase Conditioning**: Phase-aware policy training for behavioral decomposition
+- **RealNVP Flows**: Dinh et al. "Density estimation using Real NVP" (ICLR 2017)
+- **ACT Architecture**: Action Chunking Transformers for imitation learning
+
+The RealNVP implementation provides non-linear, invertible normalizing flows for per-phase action space transformation, enabling more expressive canonical action representations compared to linear methods.
 
 ## Questions?
 

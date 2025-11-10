@@ -30,6 +30,9 @@ DATASET_DIR = Path('/home/steini/Documents/git/act/dataset_dir')
 NUM_EPISODES = 50
 EPISODE_LEN = 400  # Expected episode length
 
+# Gaussianizer path (for flow-normalized actions)
+GAUSSIANIZER_PATH = Path('/home/steini/Documents/git/act/phase_results/dataset_dir_gaussianizer.pkl')
+
 # UMAP parameters (defaults)
 UMAP_N_NEIGHBORS = 15
 UMAP_MIN_DIST = 0.1
@@ -42,23 +45,26 @@ TEMPORAL_BIN_LABELS = ['0-20%', '20-40%', '40-60%', '60-80%', '80-100%']
 
 print(f"Dataset directory: {DATASET_DIR}")
 print(f"Number of episodes: {NUM_EPISODES}")
+print(f"Gaussianizer path: {GAUSSIANIZER_PATH}")
 print(f"UMAP parameters: n_neighbors={UMAP_N_NEIGHBORS}, min_dist={UMAP_MIN_DIST}, metric={UMAP_METRIC}")
 
 # %% [markdown]
 ## Data Loading
 
 # %%
-def load_demonstration_data(dataset_dir: Path, num_episodes: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_demonstration_data(dataset_dir: Path, num_episodes: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Load raw actions and phase labels from all episodes.
+    Load raw actions, canonical actions, and phase labels from all episodes.
 
     Returns:
         actions: (N, 14) array of environment actions
+        canonical_actions: (N, 14) array of flow-normalized canonical actions
         phase_labels: (N,) array of phase assignments
         episode_ids: (N,) array indicating which episode each timestep belongs to
         timestep_ids: (N,) array indicating timestep within episode
     """
     all_actions = []
+    all_canonical_actions = []
     all_phase_labels = []
     all_episode_ids = []
     all_timestep_ids = []
@@ -73,13 +79,15 @@ def load_demonstration_data(dataset_dir: Path, num_episodes: int) -> Tuple[np.nd
             continue
 
         with h5py.File(episode_file, 'r') as f:
-            # Load actions and phase labels
+            # Load actions, canonical actions, and phase labels
             actions = f['/action'][:]
+            canonical_actions = f['/canonical_actions'][:]
             phase_labels = f['/phase_labels'][:]
 
             episode_len = len(actions)
 
             all_actions.append(actions)
+            all_canonical_actions.append(canonical_actions)
             all_phase_labels.append(phase_labels)
             all_episode_ids.append(np.full(episode_len, ep_idx))
             all_timestep_ids.append(np.arange(episode_len))
@@ -89,6 +97,7 @@ def load_demonstration_data(dataset_dir: Path, num_episodes: int) -> Tuple[np.nd
 
     # Concatenate all data
     actions = np.concatenate(all_actions, axis=0)
+    canonical_actions = np.concatenate(all_canonical_actions, axis=0)
     phase_labels = np.concatenate(all_phase_labels, axis=0)
     episode_ids = np.concatenate(all_episode_ids, axis=0)
     timestep_ids = np.concatenate(all_timestep_ids, axis=0)
@@ -96,13 +105,14 @@ def load_demonstration_data(dataset_dir: Path, num_episodes: int) -> Tuple[np.nd
     print(f"\nData loaded successfully!")
     print(f"  Total timesteps: {len(actions)}")
     print(f"  Action dimensions: {actions.shape[1]}")
+    print(f"  Canonical action dimensions: {canonical_actions.shape[1]}")
     print(f"  Unique phases: {np.unique(phase_labels)}")
 
-    return actions, phase_labels, episode_ids, timestep_ids
+    return actions, canonical_actions, phase_labels, episode_ids, timestep_ids
 
 
 # Load the data
-actions, phase_labels, episode_ids, timestep_ids = load_demonstration_data(DATASET_DIR, NUM_EPISODES)
+actions, canonical_actions, phase_labels, episode_ids, timestep_ids = load_demonstration_data(DATASET_DIR, NUM_EPISODES)
 
 # %% [markdown]
 ## Temporal Binning
@@ -539,12 +549,250 @@ print("="*60)
 
 # %%
 print("\nPotential extensions for this notebook:")
-print("  - Compare environment vs canonical action spaces")
 print("  - Add state (qpos) to action space visualization")
 print("  - Compute cluster quality metrics (silhouette score)")
 print("  - Visualize phase transition dynamics")
 print("  - Per-dimension action distribution analysis")
 print("  - UMAP parameter sweep (n_neighbors, min_dist)")
 print("  - Interactive selection to examine specific episodes/phases")
+
+# %% [markdown]
+# # Flow-Normalized (Canonical) Action Space Visualization
+#
+# This section visualizes the **canonical action space** created by the RealNVP flow models.
+# Each phase has its own flow that transforms environment actions → canonical actions (z ~ N(0, I)).
+# We expect canonical actions to:
+# - Have more uniform Gaussian-like distributions
+# - Show less phase-specific clustering (flows "flatten" phase structure)
+# - Reveal if temporal progression is preserved after normalization
+
+# %% [markdown]
+## Summary Statistics for Canonical Actions
+
+# %%
+print("="*60)
+print("CANONICAL ACTION SPACE SUMMARY")
+print("="*60)
+print(f"\nCanonical Action Statistics (Flow-Normalized):")
+print(f"  Mean: {canonical_actions.mean(axis=0)}")
+print(f"  Std:  {canonical_actions.std(axis=0)}")
+print(f"  Min:  {canonical_actions.min(axis=0)}")
+print(f"  Max:  {canonical_actions.max(axis=0)}")
+
+print(f"\nComparison with Environment Actions:")
+print(f"  Environment mean range: [{actions.mean(axis=0).min():.4f}, {actions.mean(axis=0).max():.4f}]")
+print(f"  Canonical mean range:   [{canonical_actions.mean(axis=0).min():.4f}, {canonical_actions.mean(axis=0).max():.4f}]")
+print(f"  Environment std range:  [{actions.std(axis=0).min():.4f}, {actions.std(axis=0).max():.4f}]")
+print(f"  Canonical std range:    [{canonical_actions.std(axis=0).min():.4f}, {canonical_actions.std(axis=0).max():.4f}]")
+
+print("\nExpected: Canonical actions should have means ≈ 0 and stds ≈ 1 (Gaussian normalized)")
+print("="*60)
+
+# %% [markdown]
+## Combined UMAP for Canonical Actions
+
+# %%
+print("\nRunning UMAP on canonical (flow-normalized) actions...")
+print(f"  Input shape: {canonical_actions.shape}")
+
+# 2D UMAP for canonical actions
+print("\n  Computing 2D embedding for canonical actions...")
+umap_canonical_2d = umap.UMAP(
+    n_neighbors=UMAP_N_NEIGHBORS,
+    min_dist=UMAP_MIN_DIST,
+    n_components=2,
+    metric=UMAP_METRIC,
+    random_state=RANDOM_STATE,
+    verbose=True
+)
+embedding_canonical_2d = umap_canonical_2d.fit_transform(canonical_actions)
+print(f"    2D embedding shape: {embedding_canonical_2d.shape}")
+
+# 3D UMAP for canonical actions
+print("\n  Computing 3D embedding for canonical actions...")
+umap_canonical_3d = umap.UMAP(
+    n_neighbors=UMAP_N_NEIGHBORS,
+    min_dist=UMAP_MIN_DIST,
+    n_components=3,
+    metric=UMAP_METRIC,
+    random_state=RANDOM_STATE,
+    verbose=True
+)
+embedding_canonical_3d = umap_canonical_3d.fit_transform(canonical_actions)
+print(f"    3D embedding shape: {embedding_canonical_3d.shape}")
+
+print("\nCanonical action UMAP computation complete!")
+
+# %%
+# Create 2D visualization colored by temporal progression
+fig_canonical_2d = create_2d_scatter(
+    embedding_canonical_2d,
+    temporal_bins,
+    temporal_labels_str,
+    "2D UMAP: Canonical (Flow-Normalized) Actions colored by Episode Progress",
+    colorscale='Plasma',
+    hover_data=hover_data
+)
+fig_canonical_2d.show()
+
+# Create 3D visualization colored by temporal progression
+fig_canonical_3d = create_3d_scatter(
+    embedding_canonical_3d,
+    temporal_bins,
+    temporal_labels_str,
+    "3D UMAP: Canonical (Flow-Normalized) Actions colored by Episode Progress",
+    colorscale='Plasma',
+    hover_data=hover_data
+)
+fig_canonical_3d.show()
+
+print("Canonical action visualizations created!")
+
+# %% [markdown]
+## Per-Phase UMAP for Canonical Actions
+
+# %%
+print("\nComputing per-phase UMAP embeddings for canonical actions...")
+
+# Create per-phase embeddings for canonical actions
+phase_canonical_embeddings = {}
+phase_canonical_temporal_bins = {}
+phase_canonical_episode_ids = {}
+phase_canonical_timestep_ids = {}
+
+for phase in unique_phases:
+    phase_int = int(phase)
+    print(f"\n  Processing Phase {phase_int} (canonical actions)...")
+
+    # Filter canonical actions for this phase
+    phase_mask = phase_labels == phase
+    phase_canonical = canonical_actions[phase_mask]
+    phase_temporal = temporal_bins[phase_mask]
+    phase_episodes = episode_ids[phase_mask]
+    phase_timesteps = timestep_ids[phase_mask]
+
+    print(f"    Samples in phase: {len(phase_canonical)}")
+
+    # Compute 2D UMAP for this phase's canonical actions
+    umap_phase_canonical = umap.UMAP(
+        n_neighbors=min(UMAP_N_NEIGHBORS, len(phase_canonical) - 1),
+        min_dist=UMAP_MIN_DIST,
+        n_components=2,
+        metric=UMAP_METRIC,
+        random_state=RANDOM_STATE,
+        verbose=False
+    )
+    embedding_phase_canonical = umap_phase_canonical.fit_transform(phase_canonical)
+
+    # Store results
+    phase_canonical_embeddings[phase_int] = embedding_phase_canonical
+    phase_canonical_temporal_bins[phase_int] = phase_temporal
+    phase_canonical_episode_ids[phase_int] = phase_episodes
+    phase_canonical_timestep_ids[phase_int] = phase_timesteps
+
+    print(f"    Embedding shape: {embedding_phase_canonical.shape}")
+
+print("\nPer-phase canonical action UMAP computation complete!")
+
+# %%
+# Create subplot figure with one plot per phase for canonical actions
+fig_per_phase_canonical = make_subplots(
+    rows=1, cols=num_phases,
+    subplot_titles=[f"Phase {int(p)} (Canonical)" for p in unique_phases],
+    horizontal_spacing=0.08
+)
+
+# Add trace for each phase
+for idx, phase in enumerate(unique_phases):
+    phase_int = int(phase)
+    embedding = phase_canonical_embeddings[phase_int]
+    temporal = phase_canonical_temporal_bins[phase_int]
+    episodes = phase_canonical_episode_ids[phase_int]
+    timesteps = phase_canonical_timestep_ids[phase_int]
+
+    # Create hover text
+    hover_text = []
+    for i in range(len(embedding)):
+        text = f"Episode: {episodes[i]}<br>"
+        text += f"Timestep: {timesteps[i]}<br>"
+        text += f"Temporal Bin: {TEMPORAL_BIN_LABELS[int(temporal[i])]}<br>"
+        text += f"UMAP X: {embedding[i, 0]:.3f}<br>"
+        text += f"UMAP Y: {embedding[i, 1]:.3f}"
+        hover_text.append(text)
+
+    # Add scatter trace
+    fig_per_phase_canonical.add_trace(
+        go.Scatter(
+            x=embedding[:, 0],
+            y=embedding[:, 1],
+            mode='markers',
+            marker=dict(
+                size=3,
+                color=temporal,
+                colorscale='Plasma',
+                showscale=(idx == num_phases - 1),  # Only show colorbar on last subplot
+                cmin=0,
+                cmax=NUM_TEMPORAL_BINS - 1,
+                opacity=0.6,
+                colorbar=dict(
+                    title="Episode<br>Progress",
+                    tickvals=list(range(NUM_TEMPORAL_BINS)),
+                    ticktext=TEMPORAL_BIN_LABELS,
+                    x=1.02
+                ) if idx == num_phases - 1 else None
+            ),
+            text=hover_text,
+            hovertemplate='%{text}<extra></extra>',
+            showlegend=False
+        ),
+        row=1, col=idx + 1
+    )
+
+    # Update axes labels
+    fig_per_phase_canonical.update_xaxes(title_text="UMAP Dim 1", row=1, col=idx + 1)
+    if idx == 0:
+        fig_per_phase_canonical.update_yaxes(title_text="UMAP Dim 2", row=1, col=idx + 1)
+
+# Update overall layout
+fig_per_phase_canonical.update_layout(
+    title_text="Per-Phase UMAP: Canonical (Flow-Normalized) Actions Colored by Episode Progress",
+    width=400 * num_phases,
+    height=500,
+    hovermode='closest'
+)
+
+fig_per_phase_canonical.show()
+
+print("Per-phase canonical action visualization created!")
+
+# %% [markdown]
+## Interpretation: Environment vs Canonical Action Spaces
+
+# %%
+print("="*60)
+print("ENVIRONMENT vs CANONICAL ACTION SPACE COMPARISON")
+print("="*60)
+print("\nKey Questions:")
+print("\n1. Distribution Shape:")
+print("   - Are canonical actions more Gaussian-distributed?")
+print("   - Check if mean ≈ 0 and std ≈ 1 across dimensions")
+print()
+print("2. Phase Clustering:")
+print("   - Environment actions should show distinct phase clusters")
+print("   - Canonical actions may show LESS phase clustering (flows normalize per-phase)")
+print()
+print("3. Temporal Structure:")
+print("   - Does temporal progression remain visible in canonical space?")
+print("   - If yes: Flow preserves task dynamics")
+print("   - If no: Flow may be removing too much structure")
+print()
+print("4. Per-Phase Spread:")
+print("   - Environment: Each phase may have distinct spread/density")
+print("   - Canonical: Each phase should be more uniformly distributed")
+print()
+print("5. Overall Structure:")
+print("   - Compare environment 2D/3D plots with canonical 2D/3D plots")
+print("   - Canonical should look more 'uniform' and 'spread out'")
+print("="*60)
 
 # %%
